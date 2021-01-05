@@ -2,19 +2,26 @@
 //  LFVideoCapture.m
 //  LFLiveKit
 //
-//  Created by 倾慕 on 16/5/1.
-//  Copyright © 2016年 倾慕. All rights reserved.
+//  Created by LaiFeng on 16/5/20.
+//  Copyright © 2016年 LaiFeng All rights reserved.
 //
 
 #import "LFVideoCapture.h"
-#import "GPUImage.h"
 #import "LFGPUImageBeautyFilter.h"
 #import "LFGPUImageEmptyFilter.h"
+
+#if __has_include(<GPUImage/GPUImage.h>)
+#import <GPUImage/GPUImage.h>
+#elif __has_include("GPUImage/GPUImage.h")
+#import "GPUImage/GPUImage.h"
+#else
+#import "GPUImage.h"
+#endif
 
 @interface LFVideoCapture ()
 
 @property (nonatomic, strong) GPUImageVideoCamera *videoCamera;
-@property (nonatomic, weak) LFGPUImageBeautyFilter *beautyFilter;
+@property (nonatomic, strong) LFGPUImageBeautyFilter *beautyFilter;
 @property (nonatomic, strong) GPUImageOutput<GPUImageInput> *filter;
 @property (nonatomic, strong) GPUImageCropFilter *cropfilter;
 @property (nonatomic, strong) GPUImageOutput<GPUImageInput> *output;
@@ -24,6 +31,8 @@
 @property (nonatomic, strong) GPUImageAlphaBlendFilter *blendFilter;
 @property (nonatomic, strong) GPUImageUIElement *uiElementInput;
 @property (nonatomic, strong) UIView *waterMarkContentView;
+
+@property (nonatomic, strong) GPUImageMovieWriter *movieWriter;
 
 @end
 
@@ -41,6 +50,7 @@
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(willEnterBackground:) name:UIApplicationWillResignActiveNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(willEnterForeground:) name:UIApplicationDidBecomeActiveNotification object:nil];
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(statusBarChanged:) name:UIApplicationWillChangeStatusBarOrientationNotification object:nil];
+        
         self.beautyFace = YES;
         self.beautyLevel = 0.5;
         self.brightLevel = 0.5;
@@ -53,10 +63,10 @@
 - (void)dealloc {
     [UIApplication sharedApplication].idleTimerDisabled = NO;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
-    [self.videoCamera stopCameraCapture];
-    if(self.gpuImageView){
-        [self.gpuImageView removeFromSuperview];
-        self.gpuImageView = nil;
+    [_videoCamera stopCameraCapture];
+    if(_gpuImageView){
+        [_gpuImageView removeFromSuperview];
+        _gpuImageView = nil;
     }
 }
 
@@ -65,24 +75,8 @@
 - (GPUImageVideoCamera *)videoCamera{
     if(!_videoCamera){
         _videoCamera = [[GPUImageVideoCamera alloc] initWithSessionPreset:_configuration.avSessionPreset cameraPosition:AVCaptureDevicePositionFront];
-        UIInterfaceOrientation statusBar = [[UIApplication sharedApplication] statusBarOrientation];
-        if (self.configuration.landscape) {
-            if (statusBar != UIInterfaceOrientationLandscapeLeft && statusBar != UIInterfaceOrientationLandscapeRight) {
-                @throw [NSException exceptionWithName:@"当前设置方向出错" reason:@"LFLiveVideoConfiguration landscape error" userInfo:nil];
-                _videoCamera.outputImageOrientation = UIInterfaceOrientationLandscapeLeft;
-            } else {
-                _videoCamera.outputImageOrientation = statusBar;
-            }
-        } else {
-            if (statusBar != UIInterfaceOrientationPortrait && statusBar != UIInterfaceOrientationPortraitUpsideDown) {
-                @throw [NSException exceptionWithName:@"当前设置方向出错" reason:@"LFLiveVideoConfiguration landscape error" userInfo:nil];
-                _videoCamera.outputImageOrientation = UIInterfaceOrientationPortrait;
-            } else {
-                _videoCamera.outputImageOrientation = statusBar;
-            }
-        }
-        
-        _videoCamera.horizontallyMirrorFrontFacingCamera = YES;
+        _videoCamera.outputImageOrientation = _configuration.outputImageOrientation;
+        _videoCamera.horizontallyMirrorFrontFacingCamera = NO;
         _videoCamera.horizontallyMirrorRearFacingCamera = NO;
         _videoCamera.frameRate = (int32_t)_configuration.videoFrameRate;
     }
@@ -96,10 +90,12 @@
     if (!_running) {
         [UIApplication sharedApplication].idleTimerDisabled = NO;
         [self.videoCamera stopCameraCapture];
+        if(self.saveLocalVideo) [self.movieWriter finishRecording];
     } else {
         [UIApplication sharedApplication].idleTimerDisabled = YES;
         [self reloadFilter];
         [self.videoCamera startCameraCapture];
+        if(self.saveLocalVideo) [self.movieWriter startRecording];
     }
 }
 
@@ -114,8 +110,10 @@
 }
 
 - (void)setCaptureDevicePosition:(AVCaptureDevicePosition)captureDevicePosition {
+    if(captureDevicePosition == self.videoCamera.cameraPosition) return;
     [self.videoCamera rotateCamera];
     self.videoCamera.frameRate = (int32_t)_configuration.videoFrameRate;
+    [self reloadMirror];
 }
 
 - (AVCaptureDevicePosition)captureDevicePosition {
@@ -162,7 +160,6 @@
 
 - (void)setMirror:(BOOL)mirror {
     _mirror = mirror;
-    self.videoCamera.horizontallyMirrorFrontFacingCamera = mirror;
 }
 
 - (void)setBeautyFace:(BOOL)beautyFace{
@@ -251,10 +248,25 @@
     }
     return _gpuImageView;
 }
+
 -(UIImage *)currentImage{
-    [_filter useNextFrameForImageCapture];
-    return _filter.imageFromCurrentFramebuffer;
+    if(_filter){
+        [_filter useNextFrameForImageCapture];
+        return _filter.imageFromCurrentFramebuffer;
+    }
+    return nil;
 }
+
+- (GPUImageMovieWriter*)movieWriter{
+    if(!_movieWriter){
+        _movieWriter = [[GPUImageMovieWriter alloc] initWithMovieURL:self.saveLocalVideoPath size:self.configuration.videoSize];
+        _movieWriter.encodingLiveVideo = YES;
+        _movieWriter.shouldPassthroughAudio = YES;
+        self.videoCamera.audioEncodingTarget = self.movieWriter;
+    }
+    return _movieWriter;
+}
+
 #pragma mark -- Custom Method
 - (void)processVideo:(GPUImageOutput *)output {
     __weak typeof(self) _self = self;
@@ -267,7 +279,6 @@
     }
 }
 
-
 - (void)reloadFilter{
     [self.filter removeAllTargets];
     [self.blendFilter removeAllTargets];
@@ -279,12 +290,15 @@
     if (self.beautyFace) {
         self.output = [[LFGPUImageEmptyFilter alloc] init];
         self.filter = [[LFGPUImageBeautyFilter alloc] init];
-        self.beautyFilter = self.filter;
+        self.beautyFilter = (LFGPUImageBeautyFilter*)self.filter;
     } else {
         self.output = [[LFGPUImageEmptyFilter alloc] init];
         self.filter = [[LFGPUImageEmptyFilter alloc] init];
         self.beautyFilter = nil;
     }
+    
+    ///< 调节镜像
+    [self reloadMirror];
     
     //< 480*640 比例为4:3  强制转换为16:9
     if([self.configuration.avSessionPreset isEqualToString:AVCaptureSessionPreset640x480]){
@@ -301,11 +315,13 @@
         [self.filter addTarget:self.blendFilter];
         [self.uiElementInput addTarget:self.blendFilter];
         [self.blendFilter addTarget:self.gpuImageView];
+        if(self.saveLocalVideo) [self.blendFilter addTarget:self.movieWriter];
         [self.filter addTarget:self.output];
         [self.uiElementInput update];
     }else{
         [self.filter addTarget:self.output];
         [self.output addTarget:self.gpuImageView];
+        if(self.saveLocalVideo) [self.output addTarget:self.movieWriter];
     }
     
     [self.filter forceProcessingAtSize:self.configuration.videoSize];
@@ -313,12 +329,21 @@
     [self.blendFilter forceProcessingAtSize:self.configuration.videoSize];
     [self.uiElementInput forceProcessingAtSize:self.configuration.videoSize];
     
+    
     //< 输出数据
     __weak typeof(self) _self = self;
     [self.output setFrameProcessingCompletionBlock:^(GPUImageOutput *output, CMTime time) {
         [_self processVideo:output];
     }];
     
+}
+
+- (void)reloadMirror{
+    if(self.mirror && self.captureDevicePosition == AVCaptureDevicePositionFront){
+        self.videoCamera.horizontallyMirrorFrontFacingCamera = YES;
+    }else{
+        self.videoCamera.horizontallyMirrorFrontFacingCamera = NO;
+    }
 }
 
 #pragma mark Notification
@@ -339,17 +364,20 @@
 - (void)statusBarChanged:(NSNotification *)notification {
     NSLog(@"UIApplicationWillChangeStatusBarOrientationNotification. UserInfo: %@", notification.userInfo);
     UIInterfaceOrientation statusBar = [[UIApplication sharedApplication] statusBarOrientation];
-    if (self.configuration.landscape) {
-        if (statusBar == UIInterfaceOrientationLandscapeLeft) {
-            self.videoCamera.outputImageOrientation = UIInterfaceOrientationLandscapeRight;
-        } else if (statusBar == UIInterfaceOrientationLandscapeRight) {
-            self.videoCamera.outputImageOrientation = UIInterfaceOrientationLandscapeLeft;
-        }
-    } else {
-        if (statusBar == UIInterfaceOrientationPortrait) {
-            self.videoCamera.outputImageOrientation = UIInterfaceOrientationPortraitUpsideDown;
-        } else if (statusBar == UIInterfaceOrientationPortraitUpsideDown) {
-            self.videoCamera.outputImageOrientation = UIInterfaceOrientationPortrait;
+
+    if(self.configuration.autorotate){
+        if (self.configuration.landscape) {
+            if (statusBar == UIInterfaceOrientationLandscapeLeft) {
+                self.videoCamera.outputImageOrientation = UIInterfaceOrientationLandscapeRight;
+            } else if (statusBar == UIInterfaceOrientationLandscapeRight) {
+                self.videoCamera.outputImageOrientation = UIInterfaceOrientationLandscapeLeft;
+            }
+        } else {
+            if (statusBar == UIInterfaceOrientationPortrait) {
+                self.videoCamera.outputImageOrientation = UIInterfaceOrientationPortraitUpsideDown;
+            } else if (statusBar == UIInterfaceOrientationPortraitUpsideDown) {
+                self.videoCamera.outputImageOrientation = UIInterfaceOrientationPortrait;
+            }
         }
     }
 }
